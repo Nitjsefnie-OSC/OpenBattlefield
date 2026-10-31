@@ -36,7 +36,9 @@ jobs:
             tag: dev-slim-5.5.4
             digest: sha256:8c460bfcd89609108a73127c44d8f680e533629f9306d1c6d30f17c4c3dab452
             min_free_gib: 40
-            ubt_result_line: true
+            ubt_result_line: false
+            # 5.5's local Zen DDC server left the editor polling it at frame 0; use a Zen-free DDC graph.
+            showcase_args: -ddc=InstalledNoZenLocalFallback
           - ue: "5.6"
             tag: dev-slim-5.6.1
             digest: sha256:5e3e2f3e868963e266ec8dbb23eb7115eb20eff2c207182733842dc6bd0ba3de
@@ -194,16 +196,22 @@ jobs:
       - name: Headless showcase (-game -nullrhi)
         if: ${{ !cancelled() && steps.editor.outcome == 'success' }}
         shell: bash
+        env:
+          SHOWCASE_ARGS: ${{ matrix.showcase_args }}
         run: |
           set -uo pipefail
           # The showcase's failure branch never exits, so the external timeout bounds the run; the exit
           # code does not encode the result, the next step's assertions do.
           rc=0
+          # The full log goes to a file only: a stalled editor can print hundreds of MiB.
+          # shellcheck disable=SC2086 # SHOWCASE_ARGS is a list of flags
           docker run --rm --network none -u ue4 -v "$WORK/repo:/work" "$IMAGE" \
-            timeout --kill-after=60 2700 "$ENGINE/Engine/Binaries/Linux/UnrealEditor" /work/Tools/UEHost/OBHost.uproject \
-            -game -nullrhi -unattended -nosound -nosplash -log -stdout 2>&1 \
-            | tee "$LOGS/showcase.log" || rc=$?
+            timeout --kill-after=60 1200 "$ENGINE/Engine/Binaries/Linux/UnrealEditor" /work/Tools/UEHost/OBHost.uproject \
+            -game -nullrhi -unattended -nosound -nosplash -log -stdout $SHOWCASE_ARGS > "$LOGS/showcase.log" 2>&1 || rc=$?
           echo "showcase process exit: $rc"
+          echo "showcase log: $(wc -l < "$LOGS/showcase.log") lines, $(wc -c < "$LOGS/showcase.log") bytes"
+          echo "--- first 150 lines ---"; head -n 150 "$LOGS/showcase.log" | cut -c1-400
+          echo "--- last 150 lines ---"; tail -n 150 "$LOGS/showcase.log" | cut -c1-400
 
       - name: Assert build results and showcase lines
         if: ${{ !cancelled() && steps.editor.conclusion != 'skipped' }}
