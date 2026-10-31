@@ -31,18 +31,22 @@ jobs:
             tag: dev-slim-5.4.4
             digest: sha256:17595d6ba844e543a05fc6550b590d71b46ddfbc58bec41987dc78c36828f090
             min_free_gib: 40
+            ubt_result_line: false
           - ue: "5.5"
             tag: dev-slim-5.5.4
             digest: sha256:8c460bfcd89609108a73127c44d8f680e533629f9306d1c6d30f17c4c3dab452
             min_free_gib: 40
+            ubt_result_line: true
           - ue: "5.6"
             tag: dev-slim-5.6.1
             digest: sha256:5e3e2f3e868963e266ec8dbb23eb7115eb20eff2c207182733842dc6bd0ba3de
             min_free_gib: 50
+            ubt_result_line: true
           - ue: "5.7"
             tag: dev-slim-5.7.4
             digest: sha256:5d8fa43dbbc07ea53e6474c0f3ac33af092cc264070b0985a2d3e8c4697940f6
             min_free_gib: 50
+            ubt_result_line: true
     env:
       IMAGE: ghcr.io/epicgames/unreal-engine@${{ matrix.digest }}
       ENGINE: /home/ue4/UnrealEngine
@@ -168,6 +172,7 @@ jobs:
             -project=/work/Tools/UEHost/OBHost.uproject 2>&1 | tee "$LOGS/build-editor.log"
 
       - name: Build OBHost Linux Shipping
+        id: shipping
         if: ${{ !cancelled() && steps.editor.conclusion != 'skipped' }}
         shell: bash
         run: |
@@ -177,6 +182,7 @@ jobs:
             -project=/work/Tools/UEHost/OBHost.uproject 2>&1 | tee "$LOGS/build-shipping.log"
 
       - name: Build OBHostServer Linux Development
+        id: server
         if: ${{ !cancelled() && steps.editor.conclusion != 'skipped' }}
         shell: bash
         run: |
@@ -202,6 +208,11 @@ jobs:
       - name: Assert build results and showcase lines
         if: ${{ !cancelled() && steps.editor.conclusion != 'skipped' }}
         shell: bash
+        env:
+          EDITOR_OUTCOME: ${{ steps.editor.outcome }}
+          SHIPPING_OUTCOME: ${{ steps.shipping.outcome }}
+          SERVER_OUTCOME: ${{ steps.server.outcome }}
+          UBT_RESULT_LINE: ${{ matrix.ubt_result_line }}
         run: |
           set -u
           fail=0
@@ -214,9 +225,23 @@ jobs:
           hasnt() { [ -f "$1" ] && ! grep -qF -- "$2" "$1"; }
           passes() { [ -f "$1" ] && [ "$(tr -d '\r' < "$1" | grep -oE 'OBShowcase: after crater at .* PASS$' | sort -u | wc -l)" -eq 3 ]; }
           echo "### UE ${{ matrix.ue }} (${{ matrix.tag }}, ${{ matrix.digest }})" >> "$GITHUB_STEP_SUMMARY"
-          check "OBHostEditor Linux Development: Result: Succeeded" has "$LOGS/build-editor.log" "Result: Succeeded"
-          check "OBHost Linux Shipping: Result: Succeeded" has "$LOGS/build-shipping.log" "Result: Succeeded"
-          check "OBHostServer Linux Development: Result: Succeeded" has "$LOGS/build-server.log" "Result: Succeeded"
+          is() { [ "$1" = "$2" ]; }
+          B="$WORK/repo/Tools/UEHost/Binaries/Linux"
+          check "OBHostEditor Linux Development: UBT exit 0" is "$EDITOR_OUTCOME" success
+          check "OBHostEditor Linux Development: linked libUnrealEditor-OBHost.so" test -s "$B/libUnrealEditor-OBHost.so"
+          check "OBHost Linux Shipping: UBT exit 0" is "$SHIPPING_OUTCOME" success
+          check "OBHost Linux Shipping: linked OBHost-Linux-Shipping" test -s "$B/OBHost-Linux-Shipping"
+          check "OBHostServer Linux Development: UBT exit 0" is "$SERVER_OUTCOME" success
+          check "OBHostServer Linux Development: linked OBHostServer" test -s "$B/OBHostServer"
+          if [ "$UBT_RESULT_LINE" = true ]; then
+            check "OBHostEditor Linux Development: Result: Succeeded" has "$LOGS/build-editor.log" "Result: Succeeded"
+            check "OBHost Linux Shipping: Result: Succeeded" has "$LOGS/build-shipping.log" "Result: Succeeded"
+            check "OBHostServer Linux Development: Result: Succeeded" has "$LOGS/build-server.log" "Result: Succeeded"
+          else
+            check "OBHostEditor Linux Development: Total execution time" has "$LOGS/build-editor.log" "Total execution time:"
+            check "OBHost Linux Shipping: Total execution time" has "$LOGS/build-shipping.log" "Total execution time:"
+            check "OBHostServer Linux Development: Total execution time" has "$LOGS/build-server.log" "Total execution time:"
+          fi
           L="$LOGS/showcase.log"
           check "showcase: three 'after crater at ... PASS' lines" passes "$L"
           check "showcase: collision follows craters: 3/3" has "$L" "OBShowcase: collision follows craters: 3/3"
