@@ -34,7 +34,7 @@ All notable changes to this project are documented here. The format follows
 * CMake presets, CI matrix (GCC, Clang, MSVC, Apple Clang, C++17/20, ASan/UBSan, cross-compiler hash
   check, clang-format).
 * Unreal plugin shell: `.uplugin`, `OpenBattlefieldCore` and `OBTerrain` modules with a terrain world
-  subsystem and a reference terrain actor (not yet compiled in-engine, see `Docs/status.md`).
+  subsystem and a reference terrain actor (see `Docs/status.md`).
 * Documentation set under `Docs/`, contribution framework, issue and PR templates.
 * `TerrainWorld::CompactJournal(keepLast)` and `JournalBase()`: drop old journal entries so a world
   is reconstructed from a checkpoint snapshot plus the journal suffix. Version, last sequence, state
@@ -56,6 +56,9 @@ All notable changes to this project are documented here. The format follows
   is stale. Run in CI as `ob_snapshot_smoke`.
 * `Tools/UEHost` also walks a character into craters (one on a chunk seam) and checks it ends standing
   on the crater floor; recorded in `Docs/status.md` (#2).
+* `Tools/UEHost` gains the `OBHostServer` dedicated-server target and Linux build and headless-run
+  commands. Builds and a headless editor run verified UE 5.4–5.7 on Linux; recorded in `Docs/status.md`
+  (#2).
 * `Tools/UEHost`: `AOBResolutionGameMode` measures load time, memory, triangles, frame and GPU time and
   crater remesh latency of the `resolution` scene at 25, 12.5 and 6.25 cm, greedy on or off
   (`-OBVoxelCm=`, `-OBGreedy=`); results in `Docs/status.md`.
@@ -75,6 +78,8 @@ All notable changes to this project are documented here. The format follows
 * First in-engine build (UE 5.8.2): the `.generated.h` include in `OBTerrainTypes.h` is last again
   (UHT); the core export macro supplies `DLLEXPORT`/`DLLIMPORT`; `bFlipWinding` defaults to true
   (the terrain rendered inside out) (#2).
+* Linux build (UE 5.4–5.7): `AOBTerrainActor` declares the remesh ticket with the core's `uint64_t`;
+  Unreal's `uint64` is a different type on 64-bit Linux, so the out-parameter did not bind (#2).
 
 * A modification reaching a chunk face now marks the loaded face neighbour dirty (with the facing
   border slab in its dirty region), and force-unloading a modified chunk does the same for its

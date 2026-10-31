@@ -17,13 +17,13 @@ The MSVC preset builds with `/W4` but without `/WX` because MSVC warning output 
 ## Verified in Unreal Engine (UE 5.8.2, Windows 11, VS 2022, 2026-10-29)
 
 Built as `Plugins/OpenBattlefield` in a minimal C++ host project and run in a packaged-style
-`-game` session. Not yet repeated on 5.4–5.7, Linux or macOS.
+`-game` session. Not yet repeated on macOS or on Windows with 5.4–5.7; see the Linux section below.
 
 | Component | Verification |
 |---|---|
 | `OpenBattlefieldCore` + `OBTerrain` modules, editor target (Development) | Builds; only C4251 ("needs dll-interface") warnings for STL members of exported classes |
 | Game target, Shipping | Builds, no warnings |
-| Server target | **Not built**: requires a source-built engine; the installed engine has no server target |
+| Server target | **Not built** with this Windows installation: the installed engine has no server target. A Server target builds on Linux with UE 5.4–5.7 in Epic's development container images; see the Linux section below. |
 | `AOBTerrainActor` in an empty level | Generates a 5 x 5 x 5 chunk area (32-voxel chunks, 25 cm voxels); renders solid with `bFlipWinding = true` |
 | `ApplyCrater` | Visible craters inside a chunk, on a chunk face and on a chunk corner; complex-collision line traces at each centre drop by 275 cm for a 300 cm crater (3/3) |
 | Walking into a crater with a character | Default `ACharacter` capsule (AI-controlled) walks into two craters, one centred on a chunk face so it ends on the seam between two chunks' collision: both end on ground, 17–18 cm from the centre, feet 2 cm above the traced floor, never lower (2/2, three runs; repeated with off-game-thread remeshing, now the default: 3/3 craters, 2/2 walks) |
@@ -94,6 +94,27 @@ crater is placed on the core's surface so it is identical with collision off):
 Fixes the first build needed: the `.generated.h` include must be last (UHT); the core's export macro
 needed `DLLEXPORT`/`DLLIMPORT`, which only engine headers define; `bFlipWinding` must default to
 true because core coordinates map directly onto Unreal's left-handed axes, mirroring the winding.
+
+## Verified in Unreal Engine (UE 5.4/5.5/5.6/5.7, Linux, fork CI)
+
+The plugin was copied to `Plugins/OpenBattlefield` in `Tools/UEHost` and built on GitHub-hosted
+runners with Epic's Linux `dev-slim` development container images 5.4.4, 5.5.4, 5.6.1 and 5.7.4.
+The editor binary was run headless with `-game -nullrhi` (2026-10-31).
+
+| Component | Verification |
+|---|---|
+| `OpenBattlefieldCore` + `OBTerrain` modules, editor target (Development) | Builds on UE 5.4–5.7; no compiler warnings in plugin or host sources |
+| Game target, Shipping | Builds on UE 5.4–5.7; no compiler warnings in plugin or host sources |
+| Server target (`OBHostServer`, Development) | Builds on UE 5.4–5.7; no compiler warnings in plugin or host sources |
+| `ApplyCrater` collision | Complex-collision line traces at each centre drop by 275 cm for a 300 cm radius crater (3/3) |
+| Walking into a crater with a character | Both end on ground with feet about 2 cm above the traced floor, never lower (2/2): 17 cm from the centre on UE 5.4–5.6; 17 cm and 16 cm on UE 5.7 |
+
+The 5.5 headless run used `-ddc=InstalledNoZenLocalFallback` because the default local Zen DDC
+stalled at frame 0 waiting on the Zen server in that container.
+
+Not run: rendering and winding visuals, screenshots (NullRHI renders nothing), PIE, the resolution
+and timing harness (GPU and frame timing), running the dedicated server (it needs cooked content),
+macOS, and Windows on UE 5.4–5.7.
 
 ## Deferred features (by design)
 
