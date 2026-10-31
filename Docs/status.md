@@ -107,7 +107,7 @@ The editor binary was run headless with `-game -nullrhi` (2026-10-31).
 | Game target, Shipping | Builds on UE 5.4–5.7; no compiler warnings in plugin or host sources |
 | Server target (`OBHostServer`, Development) | Builds on UE 5.4–5.7; no compiler warnings in plugin or host sources |
 | `ApplyCrater` collision | Complex-collision line traces at each centre drop by 275 cm for a 300 cm radius crater (3/3) |
-| Walking into a crater with a character | Both end on ground with feet about 2 cm above the traced floor, never lower (2/2): 17 cm from the centre on UE 5.4–5.6; 17 cm and 16 cm on UE 5.7 |
+| Walking into a crater with a character | Both end on ground, 16–17 cm from the centre, feet about 2 cm above the traced floor, never lower (2/2 on every version in each of two runs) |
 
 The 5.5 headless run used `-ddc=InstalledNoZenLocalFallback` because the default local Zen DDC
 stalled at frame 0 waiting on the Zen server in that container.
