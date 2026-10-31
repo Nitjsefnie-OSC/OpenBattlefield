@@ -1,0 +1,228 @@
+# Builds the plugin in the UEHost project on Linux inside Epic's dev-slim engine images and runs the
+# headless showcase. Fork default branch only. Nothing from the image or the build tree is uploaded:
+# no artifacts, no caches, no registry push. The pull credential exists only before the candidate is
+# checked out.
+name: osc-adv-ue
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Branch, tag or SHA to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ue:
+    name: ue-${{ matrix.ue }}
+    runs-on: ubuntu-24.04
+    environment: epic-ghcr
+    permissions:
+      contents: read
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ue: "5.4"
+            tag: dev-slim-5.4.4
+            digest: sha256:17595d6ba844e543a05fc6550b590d71b46ddfbc58bec41987dc78c36828f090
+            min_free_gib: 40
+          - ue: "5.5"
+            tag: dev-slim-5.5.4
+            digest: sha256:8c460bfcd89609108a73127c44d8f680e533629f9306d1c6d30f17c4c3dab452
+            min_free_gib: 40
+          - ue: "5.6"
+            tag: dev-slim-5.6.1
+            digest: sha256:5e3e2f3e868963e266ec8dbb23eb7115eb20eff2c207182733842dc6bd0ba3de
+            min_free_gib: 50
+          - ue: "5.7"
+            tag: dev-slim-5.7.4
+            digest: sha256:5d8fa43dbbc07ea53e6474c0f3ac33af092cc264070b0985a2d3e8c4697940f6
+            min_free_gib: 50
+    env:
+      IMAGE: ghcr.io/epicgames/unreal-engine@${{ matrix.digest }}
+      ENGINE: /home/ue4/UnrealEngine
+    steps:
+      - name: Free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h / /mnt || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/local/share/powershell /usr/share/swift \
+            /usr/local/lib/node_modules /opt/microsoft /opt/google /usr/lib/jvm
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile
+          docker image prune -a -f > /dev/null
+          df -h / /mnt || true
+
+      - name: Place docker storage on the larger disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          avail() { df --output=avail -B1G "$1" 2>/dev/null | tail -n 1 | tr -d ' ' || echo 0; }
+          root_free=$(avail /)
+          mnt_free=0
+          if mountpoint -q /mnt; then mnt_free=$(avail /mnt); fi
+          if [ "$mnt_free" -gt "$root_free" ]; then
+            data_root=/mnt/docker
+            work=/home/runner/work-ue
+          else
+            data_root=/var/lib/docker
+            if [ "$mnt_free" -ge 15 ]; then work=/mnt/work-ue; else work=/home/runner/work-ue; fi
+          fi
+          sudo mkdir -p "$data_root" "$work"
+          sudo chown 1000:1000 "$work"
+          sudo python3 - "$data_root" <<'PY'
+          import json, os, sys
+          path = "/etc/docker/daemon.json"
+          cfg = json.load(open(path)) if os.path.exists(path) else {}
+          cfg["data-root"] = sys.argv[1]
+          cfg.setdefault("features", {})["containerd-snapshotter"] = False
+          json.dump(cfg, open(path, "w"), indent=2)
+          PY
+          sudo systemctl restart docker
+          docker info --format 'docker storage: {{.Driver}} at {{.DockerRootDir}}'
+          echo "WORK=$work" >> "$GITHUB_ENV"
+          echo "DATA_ROOT=$data_root" >> "$GITHUB_ENV"
+
+      - name: Disk gate
+        shell: bash
+        env:
+          MIN_FREE_GIB: ${{ matrix.min_free_gib }}
+        run: |
+          set -euo pipefail
+          df -h / /mnt || true
+          free=$(df --output=avail -B1G "$DATA_ROOT" | tail -n 1 | tr -d ' ')
+          echo "free on the docker disk: ${free} GiB (gate: ${MIN_FREE_GIB} GiB)"
+          if [ "$free" -lt "$MIN_FREE_GIB" ]; then
+            echo "::error::only ${free} GiB free for the engine image, below the ${MIN_FREE_GIB} GiB gate"
+            exit 1
+          fi
+
+      - name: Pull the engine image (pinned by digest), then log out
+        shell: bash
+        env:
+          EPIC_GHCR_PAT: ${{ secrets.EPIC_GHCR_PAT }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$EPIC_GHCR_PAT" | docker login ghcr.io -u Nitjsefnie --password-stdin
+          rc=0
+          docker pull --quiet "$IMAGE" || rc=$?
+          docker logout ghcr.io
+          rm -f "$HOME/.docker/config.json"
+          test ! -e "$HOME/.docker/config.json"
+          if [ "$rc" -ne 0 ]; then echo "::error::docker pull failed ($rc)"; exit "$rc"; fi
+          echo "engine image: ${{ matrix.tag }}"
+          docker image inspect "$IMAGE" --format 'image digest: {{index .RepoDigests 0}}'
+          docker image inspect "$IMAGE" --format 'image size: {{.Size}} bytes'
+          df -h / /mnt || true
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          path: src
+          persist-credentials: false
+
+      - name: Provenance
+        shell: bash
+        working-directory: src
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+          echo "tested_target_ref=$TARGET_REF"
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ ! "$checked_out_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::git rev-parse HEAD did not produce a 40-character commit SHA: $checked_out_sha"
+            exit 1
+          fi
+          printf 'checked-out SHA: %s\n' "$checked_out_sha"
+
+      - name: Lay out the host project
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Tools/UEHost/README.md layout: the repository copied to Tools/UEHost/Plugins/OpenBattlefield.
+          sudo rsync -a --exclude .git src/ "$WORK/repo/"
+          sudo mkdir -p "$WORK/repo/Tools/UEHost/Plugins"
+          sudo rsync -a --exclude .git --exclude /Tools/UEHost/Plugins src/ \
+            "$WORK/repo/Tools/UEHost/Plugins/OpenBattlefield/"
+          sudo chown -R 1000:1000 "$WORK"
+          sudo chmod -R a+rwX "$WORK"
+          mkdir -p "$RUNNER_TEMP/ue-logs"
+          echo "LOGS=$RUNNER_TEMP/ue-logs" >> "$GITHUB_ENV"
+          docker run --rm --network none -u ue4 "$IMAGE" test -x "$ENGINE/Engine/Build/BatchFiles/Linux/Build.sh"
+
+      - name: Build OBHostEditor Linux Development
+        id: editor
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none -u ue4 -v "$WORK/repo:/work" "$IMAGE" \
+            "$ENGINE/Engine/Build/BatchFiles/Linux/Build.sh" OBHostEditor Linux Development \
+            -project=/work/Tools/UEHost/OBHost.uproject 2>&1 | tee "$LOGS/build-editor.log"
+
+      - name: Build OBHost Linux Shipping
+        if: ${{ !cancelled() && steps.editor.conclusion != 'skipped' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none -u ue4 -v "$WORK/repo:/work" "$IMAGE" \
+            "$ENGINE/Engine/Build/BatchFiles/Linux/Build.sh" OBHost Linux Shipping \
+            -project=/work/Tools/UEHost/OBHost.uproject 2>&1 | tee "$LOGS/build-shipping.log"
+
+      - name: Build OBHostServer Linux Development
+        if: ${{ !cancelled() && steps.editor.conclusion != 'skipped' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none -u ue4 -v "$WORK/repo:/work" "$IMAGE" \
+            "$ENGINE/Engine/Build/BatchFiles/Linux/Build.sh" OBHostServer Linux Development \
+            -project=/work/Tools/UEHost/OBHost.uproject 2>&1 | tee "$LOGS/build-server.log"
+
+      - name: Headless showcase (-game -nullrhi)
+        if: ${{ !cancelled() && steps.editor.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          # The showcase's failure branch never exits, so the external timeout bounds the run; the exit
+          # code does not encode the result, the next step's assertions do.
+          rc=0
+          docker run --rm --network none -u ue4 -v "$WORK/repo:/work" "$IMAGE" \
+            timeout --kill-after=60 2700 "$ENGINE/Engine/Binaries/Linux/UnrealEditor" /work/Tools/UEHost/OBHost.uproject \
+            -game -nullrhi -unattended -nosound -nosplash -log -stdout 2>&1 \
+            | tee "$LOGS/showcase.log" || rc=$?
+          echo "showcase process exit: $rc"
+
+      - name: Assert build results and showcase lines
+        if: ${{ !cancelled() && steps.editor.conclusion != 'skipped' }}
+        shell: bash
+        run: |
+          set -u
+          fail=0
+          check() { # description, command...
+            local what="$1"; shift
+            if "$@"; then echo "PASS: $what"; echo "- PASS: $what" >> "$GITHUB_STEP_SUMMARY"
+            else echo "::error::FAIL: $what"; echo "- FAIL: $what" >> "$GITHUB_STEP_SUMMARY"; fail=1; fi
+          }
+          has() { [ -f "$1" ] && grep -qF -- "$2" "$1"; }
+          hasnt() { [ -f "$1" ] && ! grep -qF -- "$2" "$1"; }
+          passes() { [ -f "$1" ] && [ "$(tr -d '\r' < "$1" | grep -oE 'OBShowcase: after crater at .* PASS$' | sort -u | wc -l)" -eq 3 ]; }
+          echo "### UE ${{ matrix.ue }} (${{ matrix.tag }}, ${{ matrix.digest }})" >> "$GITHUB_STEP_SUMMARY"
+          check "OBHostEditor Linux Development: Result: Succeeded" has "$LOGS/build-editor.log" "Result: Succeeded"
+          check "OBHost Linux Shipping: Result: Succeeded" has "$LOGS/build-shipping.log" "Result: Succeeded"
+          check "OBHostServer Linux Development: Result: Succeeded" has "$LOGS/build-server.log" "Result: Succeeded"
+          L="$LOGS/showcase.log"
+          check "showcase: three 'after crater at ... PASS' lines" passes "$L"
+          check "showcase: collision follows craters: 3/3" has "$L" "OBShowcase: collision follows craters: 3/3"
+          check "showcase: character walks: 2/2" has "$L" "OBShowcase: character walks: 2/2"
+          check "showcase: done" has "$L" "OBShowcase: done"
+          check "showcase: no 'terrain never finished'" hasnt "$L" "OBShowcase: terrain never finished"
+          check "showcase: no 'no ground'" hasnt "$L" "no ground at the start point"
+          if [ -f "$L" ]; then tr -d '\r' < "$L" | grep -E 'OBShowcase:' | grep -vE 'OBShowcase: walk [0-9]+ t=' || true; fi
+          exit "$fail"
