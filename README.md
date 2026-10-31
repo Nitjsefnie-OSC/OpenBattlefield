@@ -22,7 +22,7 @@ That is a hypothesis to be tested with reproducible benchmarks, not a claim.
 | `Source/OpenBattlefieldCore` — deterministic terrain core (coordinates, chunks, procedural foundation, validated operations, journal, versions, dirty regions, serialization, hashing, mesher) | **Implemented and verified** standalone: 50 tests, sanitizers, GCC/Clang/C++17/C++20, identical state hashes across compilers |
 | `Benchmarks/` — harness with six workloads, JSON output, comparison tool | **Implemented**; sample measurements in `Docs/benchmarking.md` |
 | `.github/workflows/core-ci.yml` — Linux/macOS/Windows matrix | **Implemented** |
-| `Source/OBTerrain` + `OpenBattlefield.uplugin` — Unreal integration (world subsystem, terrain actor with ProceduralMesh render + collision) | **Built and run on UE 5.8.2** (Windows; editor and Shipping targets, terrain and craters with matching collision). Other engine versions and platforms untested. See `Docs/status.md`. |
+| `Source/OBTerrain` + `OpenBattlefield.uplugin` — Unreal integration (world subsystem, terrain actor with ProceduralMesh render + collision) | **Built and run on UE 5.8.2** (Windows; editor and Shipping targets, terrain and craters with matching collision). **Built on UE 5.4–5.7** (Linux; editor, Shipping and Server targets), with a headless editor run. macOS and Windows on UE 5.4–5.7 remain untested. See `Docs/status.md`. |
 | Destruction, construction, networking, physics, rendering, scheduling, persistence modules | **Documented boundaries only** (`Docs/future-modules.md`) |
 
 ## Quick start (no Unreal required)

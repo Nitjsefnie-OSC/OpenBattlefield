@@ -15,6 +15,8 @@ not part of the plugin; UnrealBuildTool only compiles it when you open or build 
    building it does not run it (a dedicated server needs cooked content).
 3. Run: `UnrealEditor.exe <path>/OBHost.uproject -game -windowed -ResX=1600 -ResY=900 -log`. Headless
    on Linux: `timeout 1800 <Engine>/Binaries/Linux/UnrealEditor <path>/OBHost.uproject -game -nullrhi -unattended -nosound -nosplash -log -stdout`.
+   In Epic's UE 5.5 Linux development container, the headless run needed
+   `-ddc=InstalledNoZenLocalFallback` (with the default local Zen DDC, it stalled at frame 0).
    `-nullrhi` renders nothing, so this checks collision and the walks, not the visuals; the session
    quits by itself once the checks finish, but not when the terrain never finishes meshing, hence the
    `timeout`.
