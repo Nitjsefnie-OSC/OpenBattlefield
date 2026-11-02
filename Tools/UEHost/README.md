@@ -5,9 +5,21 @@ not part of the plugin; UnrealBuildTool only compiles it when you open or build 
 
 1. Make the repository available as `Tools/UEHost/Plugins/OpenBattlefield`, for example on Windows:
    `mklink /J Tools\UEHost\Plugins\OpenBattlefield <repository root>` (or copy the repository there).
+   On Linux, copy it (re-run the copy after changing the repository):
+   `mkdir -p Tools/UEHost/Plugins && rsync -a --delete --exclude .git --exclude /Tools/UEHost/Plugins --exclude /Tools/UEHost/Binaries --exclude /Tools/UEHost/Intermediate --exclude /Tools/UEHost/Saved <repository root>/ Tools/UEHost/Plugins/OpenBattlefield/`.
 2. Build: `<Engine>/Build/BatchFiles/Build.bat OBHostEditor Win64 Development -project=<path>/OBHost.uproject`
-   (`OBHost Win64 Shipping` for the game target).
-3. Run: `UnrealEditor.exe <path>/OBHost.uproject -game -windowed -ResX=1600 -ResY=900 -log`
+   (`OBHost Win64 Shipping` for the game target). On Linux:
+   `<Engine>/Build/BatchFiles/Linux/Build.sh OBHostEditor Linux Development -project=<path>/OBHost.uproject`
+   (`OBHost Linux Shipping`, `OBHostServer Linux Development`). `OBHostServer` is a dedicated-server
+   target; it needs an engine that includes server targets (a launcher-installed engine does not), and
+   building it does not run it (a dedicated server needs cooked content).
+3. Run: `UnrealEditor.exe <path>/OBHost.uproject -game -windowed -ResX=1600 -ResY=900 -log`. Headless
+   on Linux: `timeout 1800 <Engine>/Binaries/Linux/UnrealEditor <path>/OBHost.uproject -game -nullrhi -unattended -nosound -nosplash -log -stdout`.
+   In Epic's UE 5.5 Linux development container, the headless run needed
+   `-ddc=InstalledNoZenLocalFallback` (with the default local Zen DDC, it stalled at frame 0).
+   `-nullrhi` renders nothing, so this checks collision and the walks, not the visuals; the session
+   quits by itself once the checks finish, but not when the terrain never finishes meshing, hence the
+   `timeout`.
 
 `AOBShowcaseGameMode` spawns an `AOBTerrainActor` over the template map, waits until every chunk is
 meshed, screenshots it, applies three craters through `ApplyCrater` (inside a chunk, on a chunk face,

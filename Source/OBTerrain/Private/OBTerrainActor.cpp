@@ -159,7 +159,7 @@ void AOBTerrainActor::StartRemeshJobs()
 {
     int32 Budget = MaxChunkRebuildsPerTick;
     ob::ChunkCoord Coord;
-    uint64 Ticket = 0;
+    uint64_t Ticket = 0;
     while (Budget > 0 && Scheduler.TryStart(Coord, Ticket))
     {
         if (StartRemesh(FOBCoordinates::ToIntVector(Coord), Ticket))
