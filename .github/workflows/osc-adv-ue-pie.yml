@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  # A leg fails only on infrastructure failure; editor runs report evidence without judging it.
+  # A leg fails on infrastructure or evidence-production failure, not an editor result.
   ue:
     name: ue-${{ matrix.ue }}
     runs-on: ubuntu-24.04
@@ -214,8 +214,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ -s "$LOGS/pie-tests.txt" ]; then
-            IFS= read -r pie_test < "$LOGS/pie-tests.txt"
-            echo "PIE test from listing: $pie_test"
+            pie_test=$(awk 'NR == 1 {first=$0} $0 == "Project.Maps.PIE" {found=1}
+              END {if (found) print "Project.Maps.PIE"; else print first}' "$LOGS/pie-tests.txt")
+            if [ "$pie_test" = Project.Maps.PIE ]; then
+              echo "PIE test selected: $pie_test (exact project test from listing)"
+            else
+              echo "PIE test selected: $pie_test (first other listed .Maps.PIE test)"
+            fi
           else
             pie_test=Project.Maps.PIE
             echo "No PIE map test found in listing; using fallback: $pie_test"
@@ -246,8 +251,12 @@ jobs:
           echo "PIE editor exit status (docker/timeout): $rc; timeout fired: $timed_out"
           echo "--- OBShowcase lines ---"
           awk '/OBShowcase:/ {print}' "$LOGS/pie.log"
-          echo "--- automation and PIE lines (maximum 200) ---"
-          awk 'tolower($0) ~ /automation|test completed|result=|pie|playlevel|play in editor|worldtype/ {
+          echo "--- automation lines (maximum 200) ---"
+          awk 'tolower($0) ~ /automation|test completed|result=/ {
+            count++; if (count <= 200) print
+          } END {if (count > 200) printf "truncated: printed 200 of %d matching lines\n", count}' "$LOGS/pie.log"
+          echo "--- PIE world candidate lines (maximum 200) ---"
+          awk 'tolower($0) ~ /pie|playlevel|play in editor|worldtype/ {
             count++; if (count <= 200) print
           } END {if (count > 200) printf "truncated: printed 200 of %d matching lines\n", count}' "$LOGS/pie.log"
           echo "--- errors (maximum 100) ---"
@@ -258,6 +267,7 @@ jobs:
           tail -n 60 "$LOGS/pie.log"
 
       - name: Summarize probe
+        id: summary
         if: ${{ always() }}
         continue-on-error: true
         shell: bash
@@ -301,3 +311,37 @@ jobs:
               echo '- Automation result line present: not run'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check probe infrastructure
+        if: ${{ always() }}
+        shell: bash
+        env:
+          EDITOR_OUTCOME: ${{ steps.editor.outcome }}
+          LIST_OUTCOME: ${{ steps.list.outcome }}
+          PIE_OUTCOME: ${{ steps.pie.outcome }}
+          SUMMARY_OUTCOME: ${{ steps.summary.outcome }}
+          LIST_EXIT: ${{ steps.list.outputs.exit_status }}
+          PIE_EXIT: ${{ steps.pie.outputs.exit_status }}
+        run: |
+          set -euo pipefail
+          failed=0
+          if [ "$EDITOR_OUTCOME" = success ]; then
+            for entry in "listing:$LIST_OUTCOME:$LIST_EXIT" "PIE:$PIE_OUTCOME:$PIE_EXIT"; do
+              IFS=: read -r name outcome status <<< "$entry"
+              if [ "$outcome" != success ]; then
+                echo "::error::$name evidence step did not complete successfully ($outcome)"
+                failed=1
+              fi
+              # Docker/timeout reserve 125 for their own failures and 126/127 for commands that cannot run.
+              # An editor deliberately exiting 125–127 is indistinguishable and will also be classified as a launch failure.
+              case "$status" in
+                125|126|127) echo "::error::$name container or timeout launch failed ($status)"; failed=1 ;;
+                ''|*[!0-9]*) echo "::error::$name exit status unavailable or invalid"; failed=1 ;;
+              esac
+            done
+          fi
+          if [ "$SUMMARY_OUTCOME" != success ]; then
+            echo "::error::probe summary step did not complete successfully ($SUMMARY_OUTCOME)"
+            failed=1
+          fi
+          exit "$failed"
