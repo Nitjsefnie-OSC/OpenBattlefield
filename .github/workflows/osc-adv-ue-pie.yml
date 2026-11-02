@@ -321,27 +321,38 @@ jobs:
             printf '%s\n' "$detail" || broken=1
             printf '%s %s\n' "$name" "$result" >> "$LOGS/assertions.txt" || broken=1
           }
-          three_craters() {
-            local matched line count=0
+          record_prefix='^([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]+Z[[:space:]]+)?\[[0-9.:-]+\]\[[[:space:]]*[0-9]+[[:space:]]*\]'
+          showcase_records() {
             if [ ! -r "$1" ]; then echo "log unavailable: $1"; return 2; fi
-            matched=$(awk '/OBShowcase: after crater .* PASS/ {print}' "$1") || return 2
+            grep -aE -- "${record_prefix}LogTemp: ${2}: OBShowcase: ${3}"$'\r?$' "$1"
+          }
+          three_craters() {
+            local matched line code count=0 passed=0
+            matched=$(showcase_records "$1" Display 'after crater .*') || {
+              code=$?; if [ "$code" -ne 1 ]; then return 2; fi
+            }
             if [ -n "$matched" ]; then printf '%s\n' "$matched" || return 2; fi
             while IFS= read -r line; do
-              if [ -n "$line" ]; then count=$((count + 1)); fi
+              if [ -n "$line" ]; then
+                count=$((count + 1))
+                line=${line%$'\r'}
+                if [[ "$line" =~ [[:space:]]PASS$ ]]; then passed=$((passed + 1)); fi
+              fi
             done <<< "$matched"
-            if [ "$count" -ne 3 ]; then printf 'expected 3 crater PASS lines, found %d\n' "$count"; return 1; fi
+            if [ "$count" -ne 3 ] || [ "$passed" -ne 3 ]; then
+              printf 'expected 3 crater records ending in PASS, found %d records and %d PASS\n' "$count" "$passed"
+              return 1
+            fi
           }
           has_line() {
             local code
-            if [ ! -r "$1" ]; then echo "log unavailable: $1"; return 2; fi
-            if grep -aE -- "$2" "$1"; then return 0; else code=$?; fi
-            if [ "$code" -eq 1 ]; then echo "no line matching: $2"; return 1; fi
+            if showcase_records "$1" Display "$2"; then return 0; else code=$?; fi
+            if [ "$code" -eq 1 ]; then echo "no showcase line matching: $2"; return 1; fi
             return 2
           }
           has_no_line() {
             local code
-            if [ ! -r "$1" ]; then echo "log unavailable: $1"; return 2; fi
-            if grep -aF -- "$2" "$1"; then echo "unexpected failure line above"; return 1; else code=$?; fi
+            if showcase_records "$1" '[[:alpha:]]+' "$2"; then echo "unexpected failure line above"; return 1; else code=$?; fi
             if [ "$code" -eq 1 ]; then echo "no failure line: $2"; return 0; fi
             return 2
           }
@@ -353,13 +364,13 @@ jobs:
           }
           game_done() {
             local fail=0 problem=0 code needle
-            if has_line "$game_log" 'OBShowcase: done[[:space:]]*$'; then :; else
+            if has_line "$game_log" 'done'; then :; else
               code=$?; if [ "$code" -eq 1 ]; then fail=1; else problem=1; fi
             fi
             if exit_ok 'Run G' "$GAME_EXIT" "$GAME_TIMEOUT"; then :; else
               code=$?; if [ "$code" -eq 1 ]; then fail=1; else problem=1; fi
             fi
-            for needle in 'OBShowcase: terrain never finished' 'no ground at the start point'; do
+            for needle in 'terrain never finished.*' '.*no ground at the start point'; do
               if has_no_line "$game_log" "$needle"; then :; else
                 code=$?; if [ "$code" -eq 1 ]; then fail=1; else problem=1; fi
               fi
@@ -370,20 +381,64 @@ jobs:
           automation_done() {
             local detail
             if [ ! -r "$1" ]; then echo "log unavailable: $1"; return 2; fi
-            detail=$(awk 'index($0, "Test Completed.") || index($0, "TEST COMPLETE. EXIT CODE:") {print}
-              index($0, "Test Completed.") && index($0, "Result={Success}") && index($0, "Path={Project.Maps.PIE}") {result=1}
-              /TEST COMPLETE[.] EXIT CODE: 0([[:space:]*]|$)/ {queue=1}
+            detail=$(awk -v prefix="$record_prefix" '
+              function field(token, value) {
+                if (token ~ /^Path=[{][^{}]*[}]$/) {
+                  paths++; value=substr(token, 7, length(token)-7)
+                  if (value == "Project.Maps.PIE") target=1
+                }
+                if (token ~ /^Result=[{][^{}]*[}]$/) {
+                  results++; value=substr(token, 9, length(token)-9)
+                  if (value == "Success") success=1
+                }
+              }
+              index($0, "Test Completed.") || index($0, "TEST COMPLETE. EXIT CODE:") {print}
+              $0 ~ (prefix "LogAutomationController: [[:alpha:]]+: Test Completed[.]([[:space:]]|$)") {
+                message=$0
+                sub(prefix "LogAutomationController: [[:alpha:]]+: Test Completed[.][[:space:]]*", "", message)
+                paths=results=target=success=depth=0; token=""
+                # Split only at top-level whitespace; nested context is not a result/path field.
+                for (i=1; i<=length(message); i++) {
+                  char=substr(message, i, 1)
+                  if (char ~ /[[:space:]]/ && depth == 0) {
+                    if (token != "") field(token)
+                    token=""
+                  } else {
+                    if (char == "{") depth++
+                    if (char == "}") depth--
+                    token=token char
+                  }
+                }
+                if (token != "") field(token)
+                if (target) {
+                  if (depth != 0 || paths != 1 || results != 1 || !success) target_failed=1
+                  else result=1
+                }
+              }
+              $0 ~ (prefix "LogAutomationCommandLine: [[:alpha:]]+: .*TEST COMPLETE[.] EXIT CODE: [-+]?[0-9]+") {
+                message=$0
+                while (match(message, /TEST COMPLETE[.] EXIT CODE: [-+]?[0-9]+/)) {
+                  code=substr(message, RSTART, RLENGTH)
+                  message=substr(message, RSTART+RLENGTH)
+                  sub(/^TEST COMPLETE[.] EXIT CODE: /, "", code)
+                  if (code+0 != 0) queue_failed=1
+                }
+              }
+              $0 ~ (prefix "LogAutomationCommandLine: [[:alpha:]]+: [*][*][*][*] TEST COMPLETE[.] EXIT CODE: 0 [*][*][*][*][[:space:]]*$") {
+                if (result) queue=1
+              }
               END {
-                if (!result) print "missing successful Project.Maps.PIE Test Completed line"
-                if (!queue) print "missing TEST COMPLETE. EXIT CODE: 0 line"
-                printf "automation result flags: %d %d\n", result, queue
+                if (!result) print "missing successful Project.Maps.PIE Test Completed record"
+                if (!queue) print "missing later TEST COMPLETE. EXIT CODE: 0 record"
+                if (target_failed) print "failed or ambiguous Project.Maps.PIE result"
+                if (queue_failed) print "nonzero automation queue completion"
+                printf "automation result flags: %d %d %d %d\n", result, queue, target_failed, queue_failed
               }' "$1") || return 2
             printf '%s\n' "$detail" || return 2
-            case "$detail" in *'automation result flags: 1 1') return 0 ;; *) return 1 ;; esac
+            case "$detail" in *'automation result flags: 1 1 0 0') return 0 ;; *) return 1 ;; esac
           }
           is_pie_world() {
-            if [ ! -r "$1" ]; then echo "log unavailable: $1"; return 2; fi
-            grep -aE 'OBShowcase: world type PIE[[:space:]]*$' "$1"
+            showcase_records "$1" Display 'world type PIE'
           }
           world_markers() {
             local fail=0 problem=0 code
@@ -395,20 +450,20 @@ jobs:
             else
               code=$?; if [ "$code" -ne 1 ]; then problem=1; else echo 'PIE marker absent from Run G'; fi
             fi
-            if has_line "$game_log" 'OBShowcase: world type Game[[:space:]]*$'; then :; else
+            if has_line "$game_log" 'world type Game'; then :; else
               code=$?; if [ "$code" -eq 1 ]; then fail=1; else problem=1; fi
             fi
             if [ "$problem" -ne 0 ]; then return 2; fi
             [ "$fail" -eq 0 ]
           }
           check G1 three_craters "$game_log"
-          check G2 has_line "$game_log" 'OBShowcase: collision follows craters: 3/3[[:space:]]*$'
-          check G3 has_line "$game_log" 'OBShowcase: character walks: 2/2[[:space:]]*$'
+          check G2 has_line "$game_log" 'collision follows craters: 3/3'
+          check G3 has_line "$game_log" 'character walks: 2/2'
           check G4 game_done
           check P1 three_craters "$pie_log"
-          check P2 has_line "$pie_log" 'OBShowcase: collision follows craters: 3/3[[:space:]]*$'
-          check P3 has_line "$pie_log" 'OBShowcase: character walks: 2/2[[:space:]]*$'
-          check P4 has_line "$pie_log" 'OBShowcase: done[[:space:]]*$'
+          check P2 has_line "$pie_log" 'collision follows craters: 3/3'
+          check P3 has_line "$pie_log" 'character walks: 2/2'
+          check P4 has_line "$pie_log" 'done'
           check P5 exit_ok 'Run P' "$PIE_EXIT" "$PIE_TIMEOUT"
           check P6 automation_done "$pie_log"
           check M world_markers
