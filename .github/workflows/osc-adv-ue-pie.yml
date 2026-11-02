@@ -352,7 +352,7 @@ jobs:
           }
           has_no_line() {
             local code
-            if showcase_records "$1" '[[:alpha:]]+' "$2"; then echo "unexpected failure line above"; return 1; else code=$?; fi
+            if showcase_records "$1" '[[:alpha:]]+' ".*${2}.*"; then echo "unexpected failure line above"; return 1; else code=$?; fi
             if [ "$code" -eq 1 ]; then echo "no failure line: $2"; return 0; fi
             return 2
           }
@@ -370,7 +370,7 @@ jobs:
             if exit_ok 'Run G' "$GAME_EXIT" "$GAME_TIMEOUT"; then :; else
               code=$?; if [ "$code" -eq 1 ]; then fail=1; else problem=1; fi
             fi
-            for needle in 'terrain never finished.*' '.*no ground at the start point'; do
+            for needle in 'terrain never finished' 'no ground at the start point'; do
               if has_no_line "$game_log" "$needle"; then :; else
                 code=$?; if [ "$code" -eq 1 ]; then fail=1; else problem=1; fi
               fi
