@@ -252,12 +252,13 @@ jobs:
         run: |
           set -euo pipefail
           # Fifteen minutes bounds editor startup plus the candidate's 60-second PIE test.
+          # Run the map test, then issue automation's Quit command.
           rc=0
           # shellcheck disable=SC2086 # SHOWCASE_ARGS is a list of flags
           docker run --rm --network none -u ue4 -e LC_ALL=C -v "$WORK/repo:/work" "$IMAGE" \
             timeout --verbose --kill-after=60 900 "$ENGINE/Engine/Binaries/Linux/UnrealEditor" \
             /work/Tools/UEHost/OBHost.uproject -nullrhi -unattended -nosound -nosplash -log -stdout -FullStdOutLogOutput \
-            $SHOWCASE_ARGS '-ExecCmds=Automation RunTests Project.Maps.PIE' '-TestExit=Automation Test Queue Empty' \
+            $SHOWCASE_ARGS '-ExecCmds=Automation RunTests Project.Maps.PIE; Quit' \
             > "$LOGS/pie.log" 2>&1 || rc=$?
           timeout_check_rc=0
           timed_out=$(awk 'index($0, "timeout: sending signal TERM to command") {found=1}
@@ -392,7 +393,9 @@ jobs:
                   if (value == "Success") success=1
                 }
               }
-              index($0, "Test Completed.") || index($0, "TEST COMPLETE. EXIT CODE:") {print}
+              index($0, "Test Completed.") || index($0, "TEST COMPLETE. EXIT CODE:") ||
+                (index($0, "Test Queue Empty") && index($0, "tests performed")) ||
+                index($0, "TestExit:") {print}
               $0 ~ (prefix "LogAutomationController: [[:alpha:]]+: Test Completed[.]([[:space:]]|$)") {
                 message=$0
                 sub(prefix "LogAutomationController: [[:alpha:]]+: Test Completed[.][[:space:]]*", "", message)
