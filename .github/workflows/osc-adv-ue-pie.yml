@@ -1,24 +1,76 @@
-# Builds the plugin in the UEHost project on Linux inside Epic's dev-slim engine images and runs the
-# headless showcase. Fork default branch only. Nothing from the image or the build tree is uploaded:
-# no artifacts, no caches, no registry push. The pull credential exists only before the candidate is
-# checked out.
+# Runs the host showcase in game and PIE modes. Engine/build files stay on the runner.
 name: osc-adv-ue-pie
 
 on:
   workflow_dispatch:
     inputs:
       target_ref:
-        description: Branch, tag or SHA to build
+        description: Branch, tag or SHA to test
         required: true
+        type: string
+      mutant_refs:
+        description: Optional whitespace-separated mutant branches, tags or SHAs
+        required: false
+        default: ''
         type: string
 
 permissions:
   contents: read
 
 jobs:
-  # A leg fails on infrastructure or evidence-production failure, not an editor result.
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Assemble matrix
+        id: matrix
+        shell: bash
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+          MUTANT_REFS: ${{ inputs.mutant_refs }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          target = os.environ['TARGET_REF']
+          mutants = os.environ['MUTANT_REFS'].split()
+          if not target or any(char.isspace() for char in target):
+              raise SystemExit('target_ref must be one non-empty ref without whitespace')
+          if len(mutants) > 63:
+              raise SystemExit('at most 63 mutant refs fit the 256-job matrix')
+          engines = [
+              dict(ue='5.4', tag='dev-slim-5.4.4',
+                   digest='sha256:17595d6ba844e543a05fc6550b590d71b46ddfbc58bec41987dc78c36828f090',
+                   min_free_gib=40, showcase_args=''),
+              # The 5.5 local Zen DDC server stalled the editor at startup.
+              dict(ue='5.5', tag='dev-slim-5.5.4',
+                   digest='sha256:8c460bfcd89609108a73127c44d8f680e533629f9306d1c6d30f17c4c3dab452',
+                   min_free_gib=40, showcase_args='-ddc=InstalledNoZenLocalFallback'),
+              dict(ue='5.6', tag='dev-slim-5.6.1',
+                   digest='sha256:5e3e2f3e868963e266ec8dbb23eb7115eb20eff2c207182733842dc6bd0ba3de',
+                   min_free_gib=50, showcase_args=''),
+              dict(ue='5.7', tag='dev-slim-5.7.4',
+                   digest='sha256:5d8fa43dbbc07ea53e6474c0f3ac33af092cc264070b0985a2d3e8c4697940f6',
+                   min_free_gib=50, showcase_args=''),
+          ]
+          refs = [('target', target)] + [('mutant', ref) for ref in mutants]
+          entries = [dict(engine, role=role, ref=ref, short_ref=ref[:12])
+                     for engine in engines for role, ref in refs]
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('matrix=' + json.dumps({'include': entries}, separators=(',', ':')) + '\n')
+          print(f'Matrix contains {len(entries)} engine/ref legs')
+          PY
+
+  # Assertion failures judge the target or mutant; infrastructure failures always fail the leg.
   ue:
-    name: ue-${{ matrix.ue }}
+    needs: prepare
+    name: ue-${{ matrix.ue }}-${{ matrix.role }}-${{ matrix.short_ref }}
     runs-on: ubuntu-24.04
     environment: epic-ghcr
     permissions:
@@ -26,30 +78,7 @@ jobs:
     timeout-minutes: 330
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - ue: "5.4"
-            tag: dev-slim-5.4.4
-            digest: sha256:17595d6ba844e543a05fc6550b590d71b46ddfbc58bec41987dc78c36828f090
-            min_free_gib: 40
-            ubt_result_line: false
-          - ue: "5.5"
-            tag: dev-slim-5.5.4
-            digest: sha256:8c460bfcd89609108a73127c44d8f680e533629f9306d1c6d30f17c4c3dab452
-            min_free_gib: 40
-            ubt_result_line: false
-            # 5.5's local Zen DDC server left the editor polling it at frame 0; use a Zen-free DDC graph.
-            showcase_args: -ddc=InstalledNoZenLocalFallback
-          - ue: "5.6"
-            tag: dev-slim-5.6.1
-            digest: sha256:5e3e2f3e868963e266ec8dbb23eb7115eb20eff2c207182733842dc6bd0ba3de
-            min_free_gib: 50
-            ubt_result_line: true
-          - ue: "5.7"
-            tag: dev-slim-5.7.4
-            digest: sha256:5d8fa43dbbc07ea53e6474c0f3ac33af092cc264070b0985a2d3e8c4697940f6
-            min_free_gib: 50
-            ubt_result_line: true
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
       IMAGE: ghcr.io/epicgames/unreal-engine@${{ matrix.digest }}
       ENGINE: /home/ue4/UnrealEngine
@@ -115,6 +144,7 @@ jobs:
         shell: bash
         env:
           EPIC_GHCR_PAT: ${{ secrets.EPIC_GHCR_PAT }}
+          IMAGE_TAG: ${{ matrix.tag }}
         run: |
           set -euo pipefail
           printf '%s' "$EPIC_GHCR_PAT" | docker login ghcr.io -u Nitjsefnie --password-stdin
@@ -124,22 +154,23 @@ jobs:
           rm -f "$HOME/.docker/config.json"
           test ! -e "$HOME/.docker/config.json"
           if [ "$rc" -ne 0 ]; then echo "::error::docker pull failed ($rc)"; exit "$rc"; fi
-          echo "engine image: ${{ matrix.tag }}"
+          echo "engine image: $IMAGE_TAG"
           docker image inspect "$IMAGE" --format 'image digest: {{index .RepoDigests 0}}'
           docker image inspect "$IMAGE" --format 'image size: {{.Size}} bytes'
           df -h / /mnt || true
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.target_ref }}
+          ref: ${{ matrix.ref }}
           path: src
           persist-credentials: false
 
       - name: Provenance
+        id: provenance
         shell: bash
         working-directory: src
         env:
-          TARGET_REF: ${{ inputs.target_ref }}
+          TARGET_REF: ${{ matrix.ref }}
         run: |
           set -euo pipefail
           echo "tested_target_ref=$TARGET_REF"
@@ -149,6 +180,7 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
+          printf 'checked_sha=%s\n' "$checked_out_sha" >> "$GITHUB_OUTPUT"
 
       - name: Lay out the host project
         shell: bash
@@ -174,8 +206,8 @@ jobs:
             "$ENGINE/Engine/Build/BatchFiles/Linux/Build.sh" OBHostEditor Linux Development \
             -project=/work/Tools/UEHost/OBHost.uproject 2>&1 | tee "$LOGS/build-editor.log"
 
-      - name: List automation tests
-        id: list
+      - name: Headless showcase (-game -nullrhi)
+        id: game
         if: ${{ !cancelled() && steps.editor.outcome == 'success' }}
         continue-on-error: true
         shell: bash
@@ -183,28 +215,34 @@ jobs:
           SHOWCASE_ARGS: ${{ matrix.showcase_args }}
         run: |
           set -euo pipefail
-          # Allow ten minutes for editor startup and test discovery; bound a stalled editor.
+          # The showcase can stall without exiting; retain the house workflow's 1200-second bound.
           rc=0
           # shellcheck disable=SC2086 # SHOWCASE_ARGS is a list of flags
           docker run --rm --network none -u ue4 -e LC_ALL=C -v "$WORK/repo:/work" "$IMAGE" \
-            timeout --verbose --kill-after=60 600 "$ENGINE/Engine/Binaries/Linux/UnrealEditor" \
-            /work/Tools/UEHost/OBHost.uproject -nullrhi -unattended -nosound -nosplash -log -stdout -FullStdOutLogOutput \
-            $SHOWCASE_ARGS '-ExecCmds=Automation List; Quit' > "$LOGS/list.log" 2>&1 || rc=$?
-
-          tr -d '\r' < "$LOGS/list.log" | sed -nE \
-            "s/^.*LogAutomationCommandLine:.*Display:[[:space:]]*'([^']+)'[[:space:]]*$/\1/p" \
-            > "$LOGS/listed-tests.txt"
-          awk '/\.Maps\.PIE$/ {print}' "$LOGS/listed-tests.txt" > "$LOGS/pie-tests.txt"
-          echo "listing editor exit status (docker/timeout): $rc"
-          echo "listed tests parsed: $(wc -l < "$LOGS/listed-tests.txt")"
-          awk '/LogAutomationCommandLine:.*Found [0-9]+ Automation Tests/ {print}' "$LOGS/list.log"
-          echo "--- listing lines matching PIE ---"
-          awk 'tolower($0) ~ /pie/ {print}' "$LOGS/list.log"
-          echo "--- last 40 listing log lines ---"
-          tail -n 40 "$LOGS/list.log"
+            timeout --verbose --kill-after=60 1200 "$ENGINE/Engine/Binaries/Linux/UnrealEditor" \
+            /work/Tools/UEHost/OBHost.uproject -game -nullrhi -unattended -nosound -nosplash -log -stdout \
+            $SHOWCASE_ARGS > "$LOGS/game.log" 2>&1 || rc=$?
+          timeout_check_rc=0
+          timed_out=$(awk 'index($0, "timeout: sending signal TERM to command") {found=1}
+            END {print found ? "yes" : "no"}' "$LOGS/game.log") || timeout_check_rc=$?
+          if [ "$timeout_check_rc" -ne 0 ]; then timed_out=unavailable; fi
+          echo "game editor exit status (docker/timeout): $rc; timeout fired: $timed_out"
+          echo "--- game OBShowcase lines ---"
+          awk '/OBShowcase:/ {print}' "$LOGS/game.log"
+          echo "--- game errors (maximum 100) ---"
+          awk 'tolower($0) ~ /error:|fatal|assertion failed/ {
+            count++; if (count <= 100) print
+          } END {if (count > 100) printf "truncated: printed 100 of %d matching lines\n", count}' "$LOGS/game.log"
+          echo "--- last 60 game log lines ---"
+          tail -n 60 "$LOGS/game.log"
+          if [ "$timeout_check_rc" -ne 0 ]; then
+            echo "::error::could not inspect game timeout diagnostic"
+            exit "$timeout_check_rc"
+          fi
           echo "exit_status=$rc" >> "$GITHUB_OUTPUT"
+          echo "timed_out=$timed_out" >> "$GITHUB_OUTPUT"
 
-      - name: Run PIE map test
+      - name: PIE automation showcase
         id: pie
         if: ${{ !cancelled() && steps.editor.outcome == 'success' }}
         continue-on-error: true
@@ -213,43 +251,20 @@ jobs:
           SHOWCASE_ARGS: ${{ matrix.showcase_args }}
         run: |
           set -euo pipefail
-          if [ -s "$LOGS/pie-tests.txt" ]; then
-            pie_test=$(awk 'NR == 1 {first=$0} $0 == "Project.Maps.PIE" {found=1}
-              END {if (found) print "Project.Maps.PIE"; else print first}' "$LOGS/pie-tests.txt")
-            if [ "$pie_test" = Project.Maps.PIE ]; then
-              echo "PIE test selected: $pie_test (exact project test from listing)"
-            else
-              echo "PIE test selected: $pie_test (first other listed .Maps.PIE test)"
-            fi
-          else
-            pie_test=Project.Maps.PIE
-            echo "No PIE map test found in listing; using fallback: $pie_test"
-          fi
-
-          # Command-line config overrides do not support arrays; configure the copied project too.
-          cat >> "$WORK/repo/Tools/UEHost/Config/DefaultEngine.ini" <<'INI'
-
-          [/Script/Engine.AutomationTestSettings]
-          !MapsToPIETest=ClearArray
-          +MapsToPIETest=/Engine/Maps/Templates/Template_Default
-          PIETestDuration=180
-          INI
-
-          # Three minutes gives the under-one-minute showcase time to finish; fifteen minutes bounds startup and PIE.
+          # Fifteen minutes bounds editor startup plus the candidate's 60-second PIE test.
           rc=0
           # shellcheck disable=SC2086 # SHOWCASE_ARGS is a list of flags
           docker run --rm --network none -u ue4 -e LC_ALL=C -v "$WORK/repo:/work" "$IMAGE" \
             timeout --verbose --kill-after=60 900 "$ENGINE/Engine/Binaries/Linux/UnrealEditor" \
             /work/Tools/UEHost/OBHost.uproject -nullrhi -unattended -nosound -nosplash -log -stdout -FullStdOutLogOutput \
-            $SHOWCASE_ARGS "-ExecCmds=Automation RunTests $pie_test" '-TestExit=Automation Test Queue Empty' \
-            '-ini:Engine:[/Script/Engine.AutomationTestSettings]:MapsToPIETest=/Engine/Maps/Templates/Template_Default,[/Script/Engine.AutomationTestSettings]:PIETestDuration=180' \
+            $SHOWCASE_ARGS '-ExecCmds=Automation RunTests Project.Maps.PIE' '-TestExit=Automation Test Queue Empty' \
             > "$LOGS/pie.log" 2>&1 || rc=$?
           timeout_check_rc=0
           timed_out=$(awk 'index($0, "timeout: sending signal TERM to command") {found=1}
             END {print found ? "yes" : "no"}' "$LOGS/pie.log") || timeout_check_rc=$?
           if [ "$timeout_check_rc" -ne 0 ]; then timed_out=unavailable; fi
           echo "PIE editor exit status (docker/timeout): $rc; timeout fired: $timed_out"
-          echo "--- OBShowcase lines ---"
+          echo "--- PIE OBShowcase lines ---"
           awk '/OBShowcase:/ {print}' "$LOGS/pie.log"
           echo "--- automation lines (maximum 200) ---"
           awk 'tolower($0) ~ /automation|test completed|result=/ {
@@ -259,100 +274,249 @@ jobs:
           awk 'tolower($0) ~ /pie|playlevel|play in editor|worldtype/ {
             count++; if (count <= 200) print
           } END {if (count > 200) printf "truncated: printed 200 of %d matching lines\n", count}' "$LOGS/pie.log"
-          echo "--- errors (maximum 100) ---"
+          echo "--- PIE errors (maximum 100) ---"
           awk 'tolower($0) ~ /error:|fatal|assertion failed/ {
             count++; if (count <= 100) print
           } END {if (count > 100) printf "truncated: printed 100 of %d matching lines\n", count}' "$LOGS/pie.log"
           echo "--- last 60 PIE log lines ---"
           tail -n 60 "$LOGS/pie.log"
           if [ "$timeout_check_rc" -ne 0 ]; then
-            echo "::error::could not inspect timeout diagnostic"
+            echo "::error::could not inspect PIE timeout diagnostic"
             exit "$timeout_check_rc"
           fi
           echo "exit_status=$rc" >> "$GITHUB_OUTPUT"
           echo "timed_out=$timed_out" >> "$GITHUB_OUTPUT"
 
-      - name: Summarize probe
+      - name: Assert showcase behavior
+        id: assertions
+        if: ${{ !cancelled() && steps.editor.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GAME_EXIT: ${{ steps.game.outputs.exit_status }}
+          GAME_TIMEOUT: ${{ steps.game.outputs.timed_out }}
+          PIE_EXIT: ${{ steps.pie.outputs.exit_status }}
+          PIE_TIMEOUT: ${{ steps.pie.outputs.timed_out }}
+        run: |
+          set -uo pipefail
+          game_log="$LOGS/game.log"
+          pie_log="$LOGS/pie.log"
+          : > "$LOGS/assertions.txt" || exit 1
+          failed_count=0
+          failed_names=''
+          broken=0
+          check() {
+            local name="$1" detail code=0 result
+            shift
+            detail=$("$@" 2>&1) || code=$?
+            if [ "$code" -eq 0 ]; then
+              result=PASS
+            else
+              result=FAIL
+              failed_count=$((failed_count + 1))
+              failed_names="${failed_names:+$failed_names,}$name"
+              if [ "$code" -ne 1 ]; then broken=1; fi
+            fi
+            printf '%s: %s\n' "$result" "$name" || broken=1
+            printf '%s\n' "$detail" || broken=1
+            printf '%s %s\n' "$name" "$result" >> "$LOGS/assertions.txt" || broken=1
+          }
+          three_craters() {
+            local matched line count=0
+            if [ ! -r "$1" ]; then echo "log unavailable: $1"; return 2; fi
+            matched=$(awk '/OBShowcase: after crater .* PASS/ {print}' "$1") || return 2
+            if [ -n "$matched" ]; then printf '%s\n' "$matched" || return 2; fi
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then count=$((count + 1)); fi
+            done <<< "$matched"
+            if [ "$count" -ne 3 ]; then printf 'expected 3 crater PASS lines, found %d\n' "$count"; return 1; fi
+          }
+          has_line() {
+            local code
+            if [ ! -r "$1" ]; then echo "log unavailable: $1"; return 2; fi
+            if grep -aE -- "$2" "$1"; then return 0; else code=$?; fi
+            if [ "$code" -eq 1 ]; then echo "no line matching: $2"; return 1; fi
+            return 2
+          }
+          has_no_line() {
+            local code
+            if [ ! -r "$1" ]; then echo "log unavailable: $1"; return 2; fi
+            if grep -aF -- "$2" "$1"; then echo "unexpected failure line above"; return 1; else code=$?; fi
+            if [ "$code" -eq 1 ]; then echo "no failure line: $2"; return 0; fi
+            return 2
+          }
+          exit_ok() {
+            case "$2" in ''|*[!0-9]*) echo "$1 exit status unavailable"; return 2 ;; esac
+            case "$3" in yes|no) ;; *) echo "$1 timeout status unavailable"; return 2 ;; esac
+            printf '%s exit status: %s; timeout fired: %s\n' "$1" "$2" "$3"
+            [ "$2" -eq 0 ] && [ "$3" = no ]
+          }
+          game_done() {
+            local fail=0 problem=0 code needle
+            if has_line "$game_log" 'OBShowcase: done[[:space:]]*$'; then :; else
+              code=$?; if [ "$code" -eq 1 ]; then fail=1; else problem=1; fi
+            fi
+            if exit_ok 'Run G' "$GAME_EXIT" "$GAME_TIMEOUT"; then :; else
+              code=$?; if [ "$code" -eq 1 ]; then fail=1; else problem=1; fi
+            fi
+            for needle in 'OBShowcase: terrain never finished' 'no ground at the start point'; do
+              if has_no_line "$game_log" "$needle"; then :; else
+                code=$?; if [ "$code" -eq 1 ]; then fail=1; else problem=1; fi
+              fi
+            done
+            if [ "$problem" -ne 0 ]; then return 2; fi
+            [ "$fail" -eq 0 ]
+          }
+          automation_done() {
+            local detail
+            if [ ! -r "$1" ]; then echo "log unavailable: $1"; return 2; fi
+            detail=$(awk 'index($0, "Test Completed.") || index($0, "TEST COMPLETE. EXIT CODE:") {print}
+              index($0, "Test Completed.") && index($0, "Result={Success}") && index($0, "Path={Project.Maps.PIE}") {result=1}
+              /TEST COMPLETE[.] EXIT CODE: 0([[:space:]*]|$)/ {queue=1}
+              END {
+                if (!result) print "missing successful Project.Maps.PIE Test Completed line"
+                if (!queue) print "missing TEST COMPLETE. EXIT CODE: 0 line"
+                printf "automation result flags: %d %d\n", result, queue
+              }' "$1") || return 2
+            printf '%s\n' "$detail" || return 2
+            case "$detail" in *'automation result flags: 1 1') return 0 ;; *) return 1 ;; esac
+          }
+          is_pie_world() {
+            if [ ! -r "$1" ]; then echo "log unavailable: $1"; return 2; fi
+            grep -aE 'OBShowcase: world type PIE[[:space:]]*$' "$1"
+          }
+          world_markers() {
+            local fail=0 problem=0 code
+            if is_pie_world "$pie_log"; then :; else
+              code=$?; if [ "$code" -eq 1 ]; then echo 'PIE marker absent from Run P'; fail=1; else problem=1; fi
+            fi
+            if is_pie_world "$game_log"; then
+              echo 'PIE marker unexpectedly present in Run G'; fail=1
+            else
+              code=$?; if [ "$code" -ne 1 ]; then problem=1; else echo 'PIE marker absent from Run G'; fi
+            fi
+            if has_line "$game_log" 'OBShowcase: world type Game[[:space:]]*$'; then :; else
+              code=$?; if [ "$code" -eq 1 ]; then fail=1; else problem=1; fi
+            fi
+            if [ "$problem" -ne 0 ]; then return 2; fi
+            [ "$fail" -eq 0 ]
+          }
+          check G1 three_craters "$game_log"
+          check G2 has_line "$game_log" 'OBShowcase: collision follows craters: 3/3[[:space:]]*$'
+          check G3 has_line "$game_log" 'OBShowcase: character walks: 2/2[[:space:]]*$'
+          check G4 game_done
+          check P1 three_craters "$pie_log"
+          check P2 has_line "$pie_log" 'OBShowcase: collision follows craters: 3/3[[:space:]]*$'
+          check P3 has_line "$pie_log" 'OBShowcase: character walks: 2/2[[:space:]]*$'
+          check P4 has_line "$pie_log" 'OBShowcase: done[[:space:]]*$'
+          check P5 exit_ok 'Run P' "$PIE_EXIT" "$PIE_TIMEOUT"
+          check P6 automation_done "$pie_log"
+          check M world_markers
+          printf 'failed_count=%s\nfailed_names=%s\n' "$failed_count" "$failed_names" >> "$GITHUB_OUTPUT" || broken=1
+          if [ "$broken" -ne 0 ]; then exit 1; fi
+
+      - name: Summarize assertions
         id: summary
         if: ${{ always() }}
         continue-on-error: true
         shell: bash
         env:
           UE_VERSION: ${{ matrix.ue }}
-          LIST_OUTCOME: ${{ steps.list.outcome }}
+          ROLE: ${{ matrix.role }}
+          TARGET_REF: ${{ matrix.ref }}
+          CHECKED_SHA: ${{ steps.provenance.outputs.checked_sha }}
+          EDITOR_OUTCOME: ${{ steps.editor.outcome }}
+          GAME_OUTCOME: ${{ steps.game.outcome }}
           PIE_OUTCOME: ${{ steps.pie.outcome }}
-          LIST_EXIT: ${{ steps.list.outputs.exit_status }}
+          ASSERT_OUTCOME: ${{ steps.assertions.outcome }}
+          GAME_EXIT: ${{ steps.game.outputs.exit_status }}
           PIE_EXIT: ${{ steps.pie.outputs.exit_status }}
-          PIE_TIMEOUT: ${{ steps.pie.outputs.timed_out }}
+          FAILED_COUNT: ${{ steps.assertions.outputs.failed_count }}
+          FAILED_NAMES: ${{ steps.assertions.outputs.failed_names }}
         run: |
           set -euo pipefail
-          list_missing='not run'
-          pie_missing='not run'
-          if [ "$LIST_OUTCOME" = failure ]; then list_missing=unavailable; fi
-          if [ "$PIE_OUTCOME" = failure ]; then pie_missing=unavailable; fi
+          valid_status() { case "$1" in ''|*[!0-9]*|125|126|127) return 1 ;; *) return 0 ;; esac; }
           {
-            printf '### UE %s\n' "$UE_VERSION"
-            printf -- '- Listing editor exit status (docker/timeout): %s\n' "${LIST_EXIT:-$list_missing}"
-            if [ -n "${LOGS:-}" ] && [ -s "$LOGS/pie-tests.txt" ]; then
-              echo '- PIE test names found:'
-              while IFS= read -r name; do printf '  - %s\n' "$name"; done < "$LOGS/pie-tests.txt"
-            elif [ -n "${LOGS:-}" ] && [ -f "$LOGS/pie-tests.txt" ]; then
-              echo '- PIE test names found: none'
-            else
-              echo '- PIE test names found: not available'
-            fi
-            printf -- '- PIE editor exit status (docker/timeout): %s\n' "${PIE_EXIT:-$pie_missing}"
-            printf -- '- PIE timeout fired: %s\n' "${PIE_TIMEOUT:-$pie_missing}"
-            if [ -n "${LOGS:-}" ] && [ -f "$LOGS/pie.log" ]; then
-              count=$(awk '/OBShowcase:/ {n++} END {print n+0}' "$LOGS/pie.log")
-              done=$(awk 'index($0, "OBShowcase: done") {found=1} END {print found ? "yes" : "no"}' "$LOGS/pie.log")
-              printf -- '- OBShowcase lines: %s\n- OBShowcase: done: %s\n' "$count" "$done"
-              awk 'tolower($0) ~ /automation/ && tolower($0) ~ /test completed/ && tolower($0) ~ /result[[:space:]]*=/ {print}' \
-                "$LOGS/pie.log" > "$LOGS/pie-results.txt"
-              if [ -s "$LOGS/pie-results.txt" ]; then
-                printf -- '- Automation result line present: yes\n\n```\n'
-                cat "$LOGS/pie-results.txt"
-                printf '```\n'
-              else
-                echo '- Automation result line present: no'
+            printf '### UE %s — %s\n' "$UE_VERSION" "$ROLE"
+            printf -- '- Ref: %s\n- Checked-out SHA: %s\n' "$TARGET_REF" "${CHECKED_SHA:-unavailable}"
+            for name in G1 G2 G3 G4 P1 P2 P3 P4 P5 P6 M; do
+              result='not available'
+              if [ -n "${LOGS:-}" ] && [ -f "$LOGS/assertions.txt" ]; then
+                result=$(awk -v name="$name" '$1 == name {print $2; exit}' "$LOGS/assertions.txt")
+                result=${result:-not available}
               fi
-            else
-              echo '- OBShowcase lines: not run'
-              echo '- OBShowcase: done: not run'
-              echo '- Automation result line present: not run'
+              printf -- '- %s: %s\n' "$name" "$result"
+            done
+            if [ "$ROLE" = mutant ]; then
+              if [ "$EDITOR_OUTCOME" = success ] && [ "$GAME_OUTCOME" = success ] && \
+                 [ "$PIE_OUTCOME" = success ] && [ "$ASSERT_OUTCOME" = success ] && \
+                 valid_status "$GAME_EXIT" && valid_status "$PIE_EXIT" && [[ "$FAILED_COUNT" =~ ^[0-9]+$ ]]; then
+                if [ "$FAILED_COUNT" -gt 0 ]; then
+                  printf -- '- Mutant verdict: KILLED (%s)\n' "$FAILED_NAMES"
+                else
+                  echo '- Mutant verdict: SURVIVED'
+                fi
+              else
+                echo '- Mutant verdict: INFRASTRUCTURE FAILURE'
+              fi
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Check probe infrastructure
+      - name: Check infrastructure and verdict
         if: ${{ always() }}
         shell: bash
         env:
+          ROLE: ${{ matrix.role }}
           EDITOR_OUTCOME: ${{ steps.editor.outcome }}
-          LIST_OUTCOME: ${{ steps.list.outcome }}
+          GAME_OUTCOME: ${{ steps.game.outcome }}
           PIE_OUTCOME: ${{ steps.pie.outcome }}
+          ASSERT_OUTCOME: ${{ steps.assertions.outcome }}
           SUMMARY_OUTCOME: ${{ steps.summary.outcome }}
-          LIST_EXIT: ${{ steps.list.outputs.exit_status }}
+          GAME_EXIT: ${{ steps.game.outputs.exit_status }}
           PIE_EXIT: ${{ steps.pie.outputs.exit_status }}
+          FAILED_COUNT: ${{ steps.assertions.outputs.failed_count }}
+          FAILED_NAMES: ${{ steps.assertions.outputs.failed_names }}
         run: |
           set -euo pipefail
-          failed=0
-          if [ "$EDITOR_OUTCOME" = success ]; then
-            for entry in "listing:$LIST_OUTCOME:$LIST_EXIT" "PIE:$PIE_OUTCOME:$PIE_EXIT"; do
+          infra=0
+          if [ "$EDITOR_OUTCOME" != success ]; then
+            echo "::error::editor build did not succeed ($EDITOR_OUTCOME)"
+            infra=1
+          else
+            for entry in "game:$GAME_OUTCOME:$GAME_EXIT" "PIE:$PIE_OUTCOME:$PIE_EXIT"; do
               IFS=: read -r name outcome status <<< "$entry"
               if [ "$outcome" != success ]; then
                 echo "::error::$name evidence step did not complete successfully ($outcome)"
-                failed=1
+                infra=1
               fi
               # Docker/timeout reserve 125 for their own failures and 126/127 for commands that cannot run.
               # An editor deliberately exiting 125–127 is indistinguishable and will also be classified as a launch failure.
               case "$status" in
-                125|126|127) echo "::error::$name container or timeout launch failed ($status)"; failed=1 ;;
-                ''|*[!0-9]*) echo "::error::$name exit status unavailable or invalid"; failed=1 ;;
+                125|126|127) echo "::error::$name container or timeout launch failed ($status)"; infra=1 ;;
+                ''|*[!0-9]*) echo "::error::$name exit status unavailable or invalid"; infra=1 ;;
               esac
             done
+            if [ "$ASSERT_OUTCOME" != success ]; then
+              echo "::error::assertion evidence step did not complete successfully ($ASSERT_OUTCOME)"
+              infra=1
+            fi
+            case "$FAILED_COUNT" in ''|*[!0-9]*) echo '::error::assertion count unavailable or invalid'; infra=1 ;; esac
+            if [ "${FAILED_COUNT:-0}" != 0 ] && [ -z "$FAILED_NAMES" ]; then
+              echo '::error::failed assertion names unavailable'; infra=1
+            fi
           fi
           if [ "$SUMMARY_OUTCOME" != success ]; then
-            echo "::error::probe summary step did not complete successfully ($SUMMARY_OUTCOME)"
-            failed=1
+            echo "::error::summary step did not complete successfully ($SUMMARY_OUTCOME)"
+            infra=1
           fi
-          exit "$failed"
+          if [ "$infra" -ne 0 ]; then echo 'INFRASTRUCTURE FAILURE'; exit 1; fi
+          case "$ROLE" in
+            target)
+              if [ "$FAILED_COUNT" -ne 0 ]; then echo "Target FAIL: $FAILED_NAMES"; exit 1; fi
+              echo 'Target PASS'
+              ;;
+            mutant)
+              if [ "$FAILED_COUNT" -ne 0 ]; then echo "KILLED: $FAILED_NAMES"; else echo 'SURVIVED'; exit 1; fi
+              ;;
+            *) echo "::error::unknown role: $ROLE"; exit 1 ;;
+          esac
