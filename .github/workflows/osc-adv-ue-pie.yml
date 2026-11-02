@@ -190,7 +190,6 @@ jobs:
             timeout --verbose --kill-after=60 600 "$ENGINE/Engine/Binaries/Linux/UnrealEditor" \
             /work/Tools/UEHost/OBHost.uproject -nullrhi -unattended -nosound -nosplash -log -stdout -FullStdOutLogOutput \
             $SHOWCASE_ARGS '-ExecCmds=Automation List; Quit' > "$LOGS/list.log" 2>&1 || rc=$?
-          echo "exit_status=$rc" >> "$GITHUB_OUTPUT"
 
           tr -d '\r' < "$LOGS/list.log" | sed -nE \
             "s/^.*LogAutomationCommandLine:.*Display:[[:space:]]*'([^']+)'[[:space:]]*$/\1/p" \
@@ -203,6 +202,7 @@ jobs:
           awk 'tolower($0) ~ /pie/ {print}' "$LOGS/list.log"
           echo "--- last 40 listing log lines ---"
           tail -n 40 "$LOGS/list.log"
+          echo "exit_status=$rc" >> "$GITHUB_OUTPUT"
 
       - name: Run PIE map test
         id: pie
@@ -246,8 +246,6 @@ jobs:
             > "$LOGS/pie.log" 2>&1 || rc=$?
           timed_out=no
           if grep -Fq 'timeout: sending signal TERM to command' "$LOGS/pie.log"; then timed_out=yes; fi
-          echo "exit_status=$rc" >> "$GITHUB_OUTPUT"
-          echo "timed_out=$timed_out" >> "$GITHUB_OUTPUT"
           echo "PIE editor exit status (docker/timeout): $rc; timeout fired: $timed_out"
           echo "--- OBShowcase lines ---"
           awk '/OBShowcase:/ {print}' "$LOGS/pie.log"
@@ -265,6 +263,8 @@ jobs:
           } END {if (count > 100) printf "truncated: printed 100 of %d matching lines\n", count}' "$LOGS/pie.log"
           echo "--- last 60 PIE log lines ---"
           tail -n 60 "$LOGS/pie.log"
+          echo "exit_status=$rc" >> "$GITHUB_OUTPUT"
+          echo "timed_out=$timed_out" >> "$GITHUB_OUTPUT"
 
       - name: Summarize probe
         id: summary
@@ -273,14 +273,20 @@ jobs:
         shell: bash
         env:
           UE_VERSION: ${{ matrix.ue }}
+          LIST_OUTCOME: ${{ steps.list.outcome }}
+          PIE_OUTCOME: ${{ steps.pie.outcome }}
           LIST_EXIT: ${{ steps.list.outputs.exit_status }}
           PIE_EXIT: ${{ steps.pie.outputs.exit_status }}
           PIE_TIMEOUT: ${{ steps.pie.outputs.timed_out }}
         run: |
           set -euo pipefail
+          list_missing='not run'
+          pie_missing='not run'
+          if [ "$LIST_OUTCOME" = failure ]; then list_missing=unavailable; fi
+          if [ "$PIE_OUTCOME" = failure ]; then pie_missing=unavailable; fi
           {
             printf '### UE %s\n' "$UE_VERSION"
-            printf -- '- Listing editor exit status (docker/timeout): %s\n' "${LIST_EXIT:-not run}"
+            printf -- '- Listing editor exit status (docker/timeout): %s\n' "${LIST_EXIT:-$list_missing}"
             if [ -n "${LOGS:-}" ] && [ -s "$LOGS/pie-tests.txt" ]; then
               echo '- PIE test names found:'
               while IFS= read -r name; do printf '  - %s\n' "$name"; done < "$LOGS/pie-tests.txt"
@@ -289,8 +295,8 @@ jobs:
             else
               echo '- PIE test names found: not available'
             fi
-            printf -- '- PIE editor exit status (docker/timeout): %s\n' "${PIE_EXIT:-not run}"
-            printf -- '- PIE timeout fired: %s\n' "${PIE_TIMEOUT:-not run}"
+            printf -- '- PIE editor exit status (docker/timeout): %s\n' "${PIE_EXIT:-$pie_missing}"
+            printf -- '- PIE timeout fired: %s\n' "${PIE_TIMEOUT:-$pie_missing}"
             if [ -n "${LOGS:-}" ] && [ -f "$LOGS/pie.log" ]; then
               count=$(awk '/OBShowcase:/ {n++} END {print n+0}' "$LOGS/pie.log")
               done=no
