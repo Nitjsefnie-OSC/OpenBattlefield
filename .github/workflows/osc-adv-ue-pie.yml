@@ -244,8 +244,10 @@ jobs:
             $SHOWCASE_ARGS "-ExecCmds=Automation RunTests $pie_test" '-TestExit=Automation Test Queue Empty' \
             '-ini:Engine:[/Script/Engine.AutomationTestSettings]:MapsToPIETest=/Engine/Maps/Templates/Template_Default,[/Script/Engine.AutomationTestSettings]:PIETestDuration=180' \
             > "$LOGS/pie.log" 2>&1 || rc=$?
-          timed_out=no
-          if grep -Fq 'timeout: sending signal TERM to command' "$LOGS/pie.log"; then timed_out=yes; fi
+          timeout_check_rc=0
+          timed_out=$(awk 'index($0, "timeout: sending signal TERM to command") {found=1}
+            END {print found ? "yes" : "no"}' "$LOGS/pie.log") || timeout_check_rc=$?
+          if [ "$timeout_check_rc" -ne 0 ]; then timed_out=unavailable; fi
           echo "PIE editor exit status (docker/timeout): $rc; timeout fired: $timed_out"
           echo "--- OBShowcase lines ---"
           awk '/OBShowcase:/ {print}' "$LOGS/pie.log"
@@ -263,6 +265,10 @@ jobs:
           } END {if (count > 100) printf "truncated: printed 100 of %d matching lines\n", count}' "$LOGS/pie.log"
           echo "--- last 60 PIE log lines ---"
           tail -n 60 "$LOGS/pie.log"
+          if [ "$timeout_check_rc" -ne 0 ]; then
+            echo "::error::could not inspect timeout diagnostic"
+            exit "$timeout_check_rc"
+          fi
           echo "exit_status=$rc" >> "$GITHUB_OUTPUT"
           echo "timed_out=$timed_out" >> "$GITHUB_OUTPUT"
 
@@ -299,8 +305,7 @@ jobs:
             printf -- '- PIE timeout fired: %s\n' "${PIE_TIMEOUT:-$pie_missing}"
             if [ -n "${LOGS:-}" ] && [ -f "$LOGS/pie.log" ]; then
               count=$(awk '/OBShowcase:/ {n++} END {print n+0}' "$LOGS/pie.log")
-              done=no
-              if grep -Fq 'OBShowcase: done' "$LOGS/pie.log"; then done=yes; fi
+              done=$(awk 'index($0, "OBShowcase: done") {found=1} END {print found ? "yes" : "no"}' "$LOGS/pie.log")
               printf -- '- OBShowcase lines: %s\n- OBShowcase: done: %s\n' "$count" "$done"
               awk 'tolower($0) ~ /automation/ && tolower($0) ~ /test completed/ && tolower($0) ~ /result[[:space:]]*=/ {print}' \
                 "$LOGS/pie.log" > "$LOGS/pie-results.txt"
